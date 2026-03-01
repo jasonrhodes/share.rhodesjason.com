@@ -1,5 +1,6 @@
 require('dotenv').config()
 const express = require('express')
+const session = require('express-session')
 const multer = require('multer')
 const Database = require('better-sqlite3')
 const path = require('path')
@@ -9,6 +10,7 @@ const { spawn } = require('child_process')
 const app = express()
 const PORT = process.env.PORT || 3002
 const UPLOAD_PASSWORD = process.env.UPLOAD_PASSWORD || 'changeme'
+const SESSION_SECRET = process.env.SESSION_SECRET || 'changeme-secret'
 const UPLOADS_DIR = path.join(__dirname, 'uploads')
 
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true })
@@ -26,7 +28,6 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `)
-// migrate existing DBs that lack the status column
 try { db.exec(`ALTER TABLE uploads ADD COLUMN status TEXT DEFAULT 'ready'`) } catch {}
 
 const storage = multer.diskStorage({
@@ -37,6 +38,20 @@ const storage = multer.diskStorage({
   }
 })
 const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } })
+
+app.use(express.urlencoded({ extended: true }))
+app.use(session({
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days
+}))
+app.use('/files', express.static(UPLOADS_DIR))
+
+function requireAuth(req, res, next) {
+  if (req.session.authenticated) return next()
+  res.redirect('/admin')
+}
 
 function slugify(name) {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'file'
@@ -66,7 +81,7 @@ function transcodeToMp4(inputPath, outputPath) {
       '-y',
       outputPath
     ])
-    ff.stderr.on('data', () => {}) // suppress ffmpeg output
+    ff.stderr.on('data', () => {})
     ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)))
   })
 }
@@ -81,8 +96,6 @@ const css = `
   header { padding: 1.25rem 2rem; border-bottom: 1px solid #1e1e1e; display: flex; justify-content: space-between; align-items: center; }
   header h1 { font-size: 1.25rem; font-weight: 700; color: #fff; letter-spacing: -0.02em; }
   header h1 a { color: inherit; }
-  .upload-btn { background: #7c9cf8; color: #0f0f0f; padding: 0.45rem 1rem; border-radius: 6px; font-weight: 600; font-size: 0.85rem; }
-  .upload-btn:hover { background: #9bb3fa; text-decoration: none; }
   main { max-width: 960px; margin: 0 auto; padding: 2rem; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
   .card { background: #1a1a1a; border-radius: 10px; overflow: hidden; border: 1px solid #222; transition: border-color 0.15s; display: block; }
@@ -131,9 +144,23 @@ const css = `
   .progress-label { font-size: 0.78rem; color: #555; }
   .error { background: #1f1010; border: 1px solid #5a2020; color: #f08080; padding: 0.7rem 1rem; border-radius: 6px; margin-bottom: 1.25rem; font-size: 0.875rem; }
   .hint { font-size: 0.775rem; color: #444; margin-top: 1.25rem; }
+  .admin-grid { display: grid; gap: 0.5rem; margin-top: 2rem; }
+  .admin-row { background: #1a1a1a; border: 1px solid #222; border-radius: 8px; padding: 0.75rem 1rem; display: flex; align-items: center; gap: 1rem; }
+  .admin-row-thumb { width: 60px; height: 40px; background: #111; border-radius: 4px; overflow: hidden; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; }
+  .admin-row-thumb img { width: 100%; height: 100%; object-fit: cover; }
+  .admin-row-info { flex: 1; min-width: 0; }
+  .admin-row-name { font-weight: 500; font-size: 0.875rem; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .admin-row-meta { font-size: 0.75rem; color: #555; margin-top: 0.15rem; }
+  .delete-btn { background: transparent; border: 1px solid #5a2020; color: #f08080; padding: 0.35rem 0.75rem; border-radius: 6px; font-size: 0.78rem; cursor: pointer; flex-shrink: 0; }
+  .delete-btn:hover { background: #2a1010; }
+  .admin-section { margin-bottom: 2.5rem; }
+  .admin-section h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #555; margin-bottom: 1rem; }
+  .admin-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+  .logout-btn { background: transparent; border: 1px solid #333; color: #666; padding: 0.35rem 0.75rem; border-radius: 6px; font-size: 0.78rem; cursor: pointer; }
+  .logout-btn:hover { border-color: #555; color: #aaa; }
 `
 
-const layout = (title, body, extraHead = '') => `<!DOCTYPE html>
+const layout = (title, body, extraHead = '', isAdmin = false) => `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -145,27 +172,19 @@ const layout = (title, body, extraHead = '') => `<!DOCTYPE html>
 <body>
   <header>
     <h1><a href="/">share</a></h1>
-    <a href="/upload" class="upload-btn">+ upload</a>
+    ${isAdmin ? '<a href="/admin" style="font-size:0.8rem;color:#555">admin</a>' : ''}
   </header>
   ${body}
 </body>
 </html>`
-
-app.use(express.urlencoded({ extended: true }))
-app.use('/files', express.static(UPLOADS_DIR))
 
 // Index
 app.get('/', (req, res) => {
   const items = db.prepare('SELECT * FROM uploads ORDER BY created_at DESC').all()
   if (items.length === 0) {
     return res.send(layout('share', `
-      <main>
-        <div class="empty">
-          <p>Nothing shared yet.</p>
-          <a href="/upload" class="upload-btn">upload something</a>
-        </div>
-      </main>
-    `))
+      <main><div class="empty"><p>Nothing shared yet.</p></div></main>
+    `, '', req.session.authenticated))
   }
   const cards = items.map(item => {
     const type = getFileType(item.mimetype)
@@ -185,29 +204,79 @@ app.get('/', (req, res) => {
         </div>
       </a>`
   }).join('')
-  res.send(layout('share', `<main><div class="grid">${cards}</div></main>`))
+  res.send(layout('share', `<main><div class="grid">${cards}</div></main>`, '', req.session.authenticated))
 })
 
-// Upload form
-app.get('/upload', (req, res) => {
-  res.send(layout('upload — share', `
+// Admin — login form or dashboard
+app.get('/admin', (req, res) => {
+  if (!req.session.authenticated) {
+    return res.send(layout('admin — share', `
+      <main>
+        <div class="container">
+          <h2>sign in</h2>
+          <form method="POST" action="/admin/login">
+            <label>password</label>
+            <input type="password" name="password" required autofocus>
+            <button type="submit">sign in</button>
+          </form>
+        </div>
+      </main>
+    `))
+  }
+
+  const items = db.prepare('SELECT * FROM uploads ORDER BY created_at DESC').all()
+
+  const rows = items.length === 0
+    ? '<p style="color:#555;font-size:0.875rem">No uploads yet.</p>'
+    : items.map(item => {
+        const type = getFileType(item.mimetype)
+        const thumb = type === 'image'
+          ? `<img src="/files/${item.filename}" alt="">`
+          : typeIcons[type]
+        const statusLabel = item.status !== 'ready' ? ` · ${item.status}` : ''
+        return `
+          <div class="admin-row">
+            <div class="admin-row-thumb">${thumb}</div>
+            <div class="admin-row-info">
+              <div class="admin-row-name"><a href="/watch/${item.slug}">${item.name}</a></div>
+              <div class="admin-row-meta">${formatSize(item.size)} · ${new Date(item.created_at).toLocaleDateString()}${statusLabel}</div>
+            </div>
+            <form method="POST" action="/admin/delete/${item.slug}" onsubmit="return confirm('Delete \\'${item.name.replace(/'/g, "\\'")}\\' permanently?')">
+              <button type="submit" class="delete-btn">delete</button>
+            </form>
+          </div>`
+      }).join('')
+
+  res.send(layout('admin — share', `
     <main>
       <div class="container">
-        <h2>upload a file</h2>
-        <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
-          <label>name</label>
-          <input type="text" name="name" placeholder="my cool video" required autofocus>
-          <label>password</label>
-          <input type="password" name="password" required>
-          <label>file</label>
-          <input type="file" name="file" id="file-input" required>
-          <button type="submit" id="submit-btn">upload</button>
-          <div class="progress-wrap" id="progress-wrap">
-            <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar"></div></div>
-            <div class="progress-label" id="progress-label">uploading...</div>
-          </div>
-        </form>
-        <p class="hint">max 500 MB · videos are automatically converted to MP4</p>
+        <div class="admin-header">
+          <h2>admin</h2>
+          <form method="POST" action="/admin/logout">
+            <button type="submit" class="logout-btn">sign out</button>
+          </form>
+        </div>
+
+        <div class="admin-section">
+          <h3>upload a file</h3>
+          <form id="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
+            <label>name</label>
+            <input type="text" name="name" placeholder="my cool video" required autofocus>
+            <label>file</label>
+            <input type="file" name="file" id="file-input" required>
+            <button type="submit" id="submit-btn">upload</button>
+            <div class="progress-wrap" id="progress-wrap">
+              <div class="progress-bar-track"><div class="progress-bar-fill" id="progress-bar"></div></div>
+              <div class="progress-label" id="progress-label">uploading...</div>
+            </div>
+          </form>
+          <p class="hint">max 500 MB · videos are automatically converted to MP4</p>
+        </div>
+
+        <div class="admin-section">
+          <h3>${items.length} upload${items.length !== 1 ? 's' : ''}</h3>
+          <div class="admin-grid">${rows}</div>
+        </div>
       </div>
     </main>
     <script>
@@ -251,30 +320,45 @@ app.get('/upload', (req, res) => {
   `))
 })
 
-// Handle upload
-app.post('/upload', upload.single('file'), (req, res) => {
-  if (req.body.password !== UPLOAD_PASSWORD) {
-    if (req.file) fs.unlinkSync(req.file.path)
-    return res.status(403).send(layout('upload — share', `
+// Admin login
+app.post('/admin/login', (req, res) => {
+  if (req.body.password === UPLOAD_PASSWORD) {
+    req.session.authenticated = true
+    res.redirect('/admin')
+  } else {
+    res.send(layout('admin — share', `
       <main>
         <div class="container">
-          <h2>upload a file</h2>
+          <h2>sign in</h2>
           <div class="error">wrong password</div>
-          <form method="POST" action="/upload" enctype="multipart/form-data">
-            <label>name</label>
-            <input type="text" name="name" value="${req.body.name || ''}" required autofocus>
+          <form method="POST" action="/admin/login">
             <label>password</label>
-            <input type="password" name="password" required>
-            <label>file</label>
-            <input type="file" name="file" required>
-            <button type="submit">upload</button>
+            <input type="password" name="password" required autofocus>
+            <button type="submit">sign in</button>
           </form>
-          <p class="hint">max 500 MB · videos are automatically converted to MP4</p>
         </div>
       </main>
     `))
   }
+})
 
+// Admin logout
+app.post('/admin/logout', (req, res) => {
+  req.session.destroy()
+  res.redirect('/')
+})
+
+// Delete upload
+app.post('/admin/delete/:slug', requireAuth, (req, res) => {
+  const item = db.prepare('SELECT * FROM uploads WHERE slug = ?').get(req.params.slug)
+  if (!item) return res.redirect('/admin')
+  try { fs.unlinkSync(path.join(UPLOADS_DIR, item.filename)) } catch {}
+  db.prepare('DELETE FROM uploads WHERE slug = ?').run(req.params.slug)
+  res.redirect('/admin')
+})
+
+// Handle upload
+app.post('/upload', requireAuth, upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).send('no file uploaded')
 
   const slug = slugify(req.body.name || 'file')
@@ -308,7 +392,7 @@ app.get('/watch/:slug', (req, res) => {
   const item = db.prepare('SELECT * FROM uploads WHERE slug = ?').get(req.params.slug)
   if (!item) return res.status(404).send(layout('not found — share', `
     <main><div class="empty"><p>file not found</p></div></main>
-  `))
+  `, '', req.session.authenticated))
 
   const shareUrl = `https://share.rhodesjason.com/watch/${item.slug}`
 
@@ -322,7 +406,7 @@ app.get('/watch/:slug', (req, res) => {
           <p class="sub">this page will refresh automatically</p>
         </div>
       </div>
-    `, `<meta http-equiv="refresh" content="4">`))
+    `, `<meta http-equiv="refresh" content="4">`, req.session.authenticated))
   }
 
   if (item.status === 'error') {
@@ -333,7 +417,7 @@ app.get('/watch/:slug', (req, res) => {
           <p>conversion failed — <a href="/files/${item.filename}" download>download original</a></p>
         </div>
       </div>
-    `))
+    `, '', req.session.authenticated))
   }
 
   const type = getFileType(item.mimetype)
@@ -362,7 +446,7 @@ app.get('/watch/:slug', (req, res) => {
         <button class="copy-btn" onclick="navigator.clipboard.writeText('${shareUrl}').then(()=>{this.textContent='copied!';setTimeout(()=>this.textContent='copy link',1500)})">copy link</button>
       </div>
     </div>
-  `))
+  `, '', req.session.authenticated))
 })
 
 app.listen(PORT, () => console.log(`share running on port ${PORT}`))
