@@ -172,7 +172,7 @@ const layout = (title, body, extraHead = '', isAdmin = false) => `<!DOCTYPE html
 <body>
   <header>
     <h1><a href="/">share</a></h1>
-    ${isAdmin ? '<a href="/admin" style="font-size:0.8rem;color:#555">admin</a>' : ''}
+    ${isAdmin ? '<a href="/admin" style="font-size:0.8rem;color:#555">admin</a>' : '<a href="/admin" style="font-size:0.8rem;color:#555">sign in</a>'}
   </header>
   ${body}
 </body>
