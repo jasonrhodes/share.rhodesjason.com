@@ -1,0 +1,32 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to server
+        env:
+          SSH_KEY: ${{ secrets.DO_SSH_KEY }}
+          HOST: ${{ secrets.DO_HOST }}
+          USER: ${{ secrets.DO_USER }}
+        run: |
+          echo "$SSH_KEY" > deploy_key
+          chmod 600 deploy_key
+
+          rsync -az --delete \
+            --exclude 'node_modules/' \
+            --exclude 'uploads/' \
+            --exclude 'share.db' \
+            --exclude '.env' \
+            --exclude '.git/' \
+            -e "ssh -i deploy_key -o StrictHostKeyChecking=no" \
+            ./ $USER@$HOST:/var/www/share/
+
+          ssh -i deploy_key -o StrictHostKeyChecking=no $USER@$HOST \
+            "cd /var/www/share && npm install --omit=dev && pm2 restart share || pm2 start server.js --name share && pm2 save"
