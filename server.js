@@ -81,8 +81,14 @@ function transcodeToMp4(inputPath, outputPath) {
       '-y',
       outputPath
     ])
-    ff.stderr.on('data', () => {})
-    ff.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)))
+    const stderrLines = []
+    ff.stderr.on('data', chunk => stderrLines.push(chunk.toString()))
+    ff.on('close', code => {
+      if (code === 0) return resolve()
+      const err = new Error(`ffmpeg exited ${code}`)
+      err.ffmpegOutput = stderrLines.join('')
+      reject(err)
+    })
   })
 }
 
@@ -371,15 +377,21 @@ app.post('/upload', requireAuth, upload.single('file'), (req, res) => {
   if (isVideo) {
     const mp4Filename = req.file.filename.replace(/\.[^.]+$/, '') + '.mp4'
     const mp4Path = path.join(UPLOADS_DIR, mp4Filename)
+    const startedAt = Date.now()
+    console.log(`[transcode] starting: "${req.body.name}" (${formatSize(req.file.size)}) slug=${slug}`)
     transcodeToMp4(req.file.path, mp4Path)
       .then(() => {
         try { fs.unlinkSync(req.file.path) } catch {}
+        const mp4Size = fs.statSync(mp4Path).size
         db.prepare('UPDATE uploads SET filename=?, mimetype=?, size=?, status=? WHERE slug=?')
-          .run(mp4Filename, 'video/mp4', fs.statSync(mp4Path).size, 'ready', slug)
-        console.log(`transcoded: ${slug}`)
+          .run(mp4Filename, 'video/mp4', mp4Size, 'ready', slug)
+        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
+        console.log(`[transcode] done: "${req.body.name}" → ${formatSize(mp4Size)} in ${elapsed}s slug=${slug}`)
       })
       .catch(err => {
-        console.error(`transcode failed for ${slug}:`, err)
+        const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1)
+        console.error(`[transcode] failed: "${req.body.name}" after ${elapsed}s slug=${slug}`)
+        console.error(`[transcode] ffmpeg output:\n${err.ffmpegOutput || err.message}`)
         db.prepare('UPDATE uploads SET status=? WHERE slug=?').run('error', slug)
       })
   }
